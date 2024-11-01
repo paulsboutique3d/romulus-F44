@@ -1,16 +1,8 @@
 #include "esp_camera.h"
 #include "esp_log.h"
-#include "dl_image.hpp"
-#include "fb_gfx.h"
-#include "image_util.hpp"
-#include "esp_timer.h"
-#include "fd_forward.hpp"
-#include "fr_forward.hpp"
-#include "human_face_detect_msr01.hpp"
-#include "human_face_detect_mnp01.hpp"
-#include "human_face_recognition.hpp"
-#include <TFT_eSPI.h> // Assuming you are using a TFT screen with the TFT_eSPI library
+#include <TFT_eSPI.h>
 
+// Camera pin definitions
 #define PWDN_GPIO_NUM    -1
 #define RESET_GPIO_NUM   -1
 #define XCLK_GPIO_NUM    21
@@ -29,22 +21,19 @@
 #define HREF_GPIO_NUM    23
 #define PCLK_GPIO_NUM    22
 
-// TFT screen pins
+// TFT screen pin definitions
 #define TFT_CS   15
-#define TFT_RST  2
-#define TFT_DC   4
+#define TFT_DC   2
+#define TFT_RST  4
+#define TFT_SCK  14
 #define TFT_MOSI 13
-#define TFT_SCLK 14
 
-// Initialize the TFT screen
-TFT_eSPI tft = TFT_eSPI(); // Create an instance of the TFT_eSPI class
-
-static const char *TAG = "example:detect";
+TFT_eSPI tft = TFT_eSPI(); // Create TFT object
 
 void setup() {
   Serial.begin(115200);
 
-  // Camera configuration
+  // Initialize the camera
   camera_config_t config;
   config.ledc_channel = LEDC_CHANNEL_0;
   config.ledc_timer = LEDC_TIMER_0;
@@ -60,93 +49,61 @@ void setup() {
   config.pin_pclk = PCLK_GPIO_NUM;
   config.pin_vsync = VSYNC_GPIO_NUM;
   config.pin_href = HREF_GPIO_NUM;
-  config.pin_sccb_sda = SIOD_GPIO_NUM;
-  config.pin_sccb_scl = SIOC_GPIO_NUM;
+  config.pin_sscb_sda = SIOD_GPIO_NUM;
+  config.pin_sscb_scl = SIOC_GPIO_NUM;
   config.pin_pwdn = PWDN_GPIO_NUM;
   config.pin_reset = RESET_GPIO_NUM;
   config.xclk_freq_hz = 20000000;
-  config.pixel_format = PIXFORMAT_RGB565; // Use RGB565 for direct display
+  config.pixel_format = PIXFORMAT_RGB565;
 
-  // Frame size
-  config.frame_size = FRAMESIZE_QVGA;
-  config.jpeg_quality = 12;
-  config.fb_count = 1;
+  // Init with high specs to pre-allocate larger buffers
+  if (psramFound()) {
+    config.frame_size = FRAMESIZE_UXGA;
+    config.jpeg_quality = 10;
+    config.fb_count = 2;
+  } else {
+    config.frame_size = FRAMESIZE_SVGA;
+    config.jpeg_quality = 12;
+    config.fb_count = 1;
+  }
 
-  // Initialize the camera
+  // Camera init
   esp_err_t err = esp_camera_init(&config);
   if (err != ESP_OK) {
     Serial.printf("Camera init failed with error 0x%x", err);
     return;
   }
 
-  // Initialize the face detection model
-  dl::detect::init();
-
   // Initialize the TFT screen
-  tft.init();
-  tft.setRotation(0); // Set the rotation to vertical
-  tft.fillScreen(TFT_BLACK); // Clear the screen
-}
-
-void applyRedTint(uint16_t* buf, int width, int height) {
-  for (int y = 0; y < height; y++) {
-    for (int x = 0; x < width; x++) {
-      uint16_t pixel = buf[y * width + x];
-      uint8_t r = (pixel >> 11) & 0x1F;
-      uint8_t g = (pixel >> 5) & 0x3F;
-      uint8_t b = pixel & 0x1F;
-
-      // Increase the red component
-      r = 0x1F; // Max red value
-
-      // Combine back to RGB565 format
-      buf[y * width + x] = (r << 11) | (g << 5) | b;
-    }
-  }
+  tft.begin();
+  tft.setRotation(0); // Set rotation to portrait mode
+  tft.fillScreen(TFT_BLACK);
 }
 
 void loop() {
   // Capture a frame
-  camera_fb_t * fb = esp_camera_fb_get();
+  camera_fb_t *fb = esp_camera_fb_get();
   if (!fb) {
     Serial.println("Camera capture failed");
     return;
   }
 
-  // Convert the frame buffer to RGB format
-  dl::image::rgb565_to_rgb888(fb->buf, fb->width, fb->height);
-
-  // Run the detection model
-  std::vector<dl::detect::box_t> boxes;
-  dl::detect::detect(fb->buf, fb->width, fb->height, boxes);
-
-  // Process the detection results
-  bool person_detected = false;
-  for (auto &box : boxes) {
-    if (box.label == "person") {
-      person_detected = true;
-      Serial.printf("Person detected at [%d, %d, %d, %d]\n", box.x, box.y, box.w, box.h);
-      // Draw a rectangle around the detected person
-      fb_gfx_drawFastHLine(fb, box.x, box.y, box.w, 0xFFFF);
-      fb_gfx_drawFastHLine(fb, box.x, box.y + box.h, box.w, 0xFFFF);
-      fb_gfx_drawFastVLine(fb, box.x, box.y, box.h, 0xFFFF);
-      fb_gfx_drawFastVLine(fb, box.x + box.w, box.y, box.h, 0xFFFF);
-    }
+  // Apply red overlay
+  uint16_t *buffer = (uint16_t*)fb->buf;
+  for (int i = 0; i < (fb->width * fb->height); i++) {
+    uint16_t pixel = buffer[i];
+    uint8_t r = (pixel >> 11) & 0x1F;
+    uint8_t g = (pixel >> 5) & 0x3F;
+    uint8_t b = pixel & 0x1F;
+    r = 0x1F; // Max red
+    buffer[i] = (r << 11) | (g << 5) | b;
   }
 
-  // Apply red tint to the entire frame
-  applyRedTint((uint16_t*)fb->buf, fb->width, fb->height);
-
-  // Display the image on the screen
-  tft.pushImage(0, 0, tft.width(), tft.height(), (uint16_t*)fb->buf);
+  // Display the image on the TFT screen
+  tft.pushImage(0, 0, 170, 320, buffer); // Adjust width and height for 170x320 screen
 
   // Return the frame buffer back to the driver for reuse
   esp_camera_fb_return(fb);
 
-  // Hold the outline on the screen for 1 second if a person is detected
-  if (person_detected) {
-    delay(1000);
-  } else {
-    delay(30); // Adjust the delay as needed for smoother video
-  }
+  delay(100); // Adjust delay as needed
 }
